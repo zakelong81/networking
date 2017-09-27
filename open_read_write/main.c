@@ -4,7 +4,7 @@
 #include <errno.h>
 #include <sys/types.h>
 #include <unistd.h>
-
+#include <ctype.h>
 
 #define BUF_SIZE 8192
 
@@ -37,14 +37,23 @@ int main(int argc, char* argv[]) {
 
 
     /* Copy process */
-    while((ret_in = read (input_fd, &buffer, BUF_SIZE)) > 0){
+    char tmp[BUF_SIZE];
+    int i = 0;
+    while((ret_in = read (input_fd, &buffer, BUF_SIZE)) > 0)
+    {
       printf ("%zu\n", ret_in);
-            ret_out = write (output_fd, &buffer, (ssize_t) ret_in);
-            if(ret_out != ret_in){
-                /* Write error */
-                perror("write");
-                return 4;
-            }
+      while(buffer[i])
+      {
+        tmp[i] = toupper(buffer[i]);
+        i++;
+      }
+      ret_out = write (output_fd, &tmp, (ssize_t) ret_in);
+
+      if(ret_out != ret_in){
+      /* Write error */
+          perror("write");
+          return 4;
+        }
     }
 
     /* Close file descriptors */
