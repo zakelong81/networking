@@ -1,0 +1,224 @@
+#!/usr/bin/expect -f
+
+set TMP_DIR tmp_local_dir_for_check
+
+set EXECUTABLES {p-counter}
+
+set HOME_DIR [file dirname [file normalize [info script]]]
+
+set BASE_FILES [list ]
+
+# Count of chunk size and tag counts
+array set tag_counts {
+	5		11
+	6		9
+	7		8
+	8		13
+	9		10
+	10		11
+	11		13
+	12		13
+	13		11
+	14		11
+	15		13
+	16		13
+	17		12
+	18		12
+	19		13
+	20		13
+	21		12
+	22		13
+	23		12
+	24		13
+	25		13
+	26		12
+	27		12
+	28		13
+	29		12
+	30		13
+	100		13
+	200		13
+	300		13
+	400		13
+	500		13
+	600		13
+	700		13
+	800		13
+	900		13
+	1000	13
+}
+
+proc print_banner {message} {
+	puts ===================================================
+    foreach m $message {
+	    puts "|  $m"
+    }
+	puts ===================================================
+}
+
+proc blank_line {} {
+	send_user "\n"
+}
+
+proc clean_up {} {
+	global TMP_DIR
+	if { [lindex [file split [pwd]] end] eq $TMP_DIR } {
+		cd ..
+	}
+	file delete -force $TMP_DIR
+}
+
+# Check if the temp directory exists
+if { [file exists $TMP_DIR] } {
+	print_banner [list "[concat Temporary directory `$TMP_DIR` exists, remove it first]"]
+	exit -1
+}
+
+# Check if help message should be printed
+if { ([llength $argv] == 0) || ([lindex $argv 0] eq "help") } {
+	send_user "Usage: [info script] <file1> <file2> ....\n"
+	send_user "  Include all files for your assignment as arguments to the script.\n"
+	send_user "  The script will create (and then delete) a small number of files in your current directory.\n"
+	return -1
+}
+
+# Create the temp directory
+file mkdir $TMP_DIR
+
+# Indicate which files are evaluated and check if they are present
+set files_in_error 0
+set error_files {}
+print_banner {"You are evaluating the following files."}
+foreach f $argv {
+	send_user "$f\n"
+
+	if { !([file exists $f]) || !([file readable $f]) || [file isdirectory $f] || ($f in $BASE_FILES)} {
+		set files_in_error 1
+		lappend error_files $f
+	}
+	if { !$files_in_error } {
+		file copy $f $TMP_DIR
+	}
+}
+
+# Print error and quit if any files unavailable
+if { $files_in_error } {
+	print_banner {"Unable to process the following files." "Ensure names and permissions are correct." "Do not submit directories." "Do not submit provided files."}
+	foreach f $error_files {
+		send_user "$f\n"
+	}
+	clean_up
+	exit -1
+}
+
+# Copy the base files to the directory
+foreach f $BASE_FILES {
+	file copy $HOME_DIR/$f $TMP_DIR
+}
+
+cd $TMP_DIR
+
+blank_line
+print_banner {"Attempting to build the executables."}
+# Flags to track compile errors and if -Wall is missing
+set wall_missing 0
+set compile_error 0
+spawn -noecho make
+expect {
+	# Compile lines are normal
+	-re ^(gcc|cc|g+).* {
+		# Check if -Wall is present in the compile command
+		if { [string first "-Wall" $expect_out(buffer)] == -1 } {set wall_missing 1}
+		exp_continue
+	}
+	# Error lines include a colon (:)
+	: {
+		set compile_error 1
+		exp_continue
+	}
+	eof
+}
+
+# Check that the executables are present
+set executable_is_missing 0
+set missing_executables {}
+foreach f $EXECUTABLES {
+	if { !([file exists $f] && [file executable $f]) } {
+		set executable_is_missing 1
+		lappend missing_executables $f
+		send_user "Errors creating program $f\n"
+
+		if { ![file exists $f] } {
+			send_user "$f does not exist\n"
+		}
+		if { ![file executable $f] } {
+			send_user "$f is not executable\n"
+		}
+	}
+}
+
+# Check for any problems
+if { $compile_error } {
+	print_banner {"Compilation failure or unclean compile, correct your code."}
+	clean_up
+	exit -1
+}
+if { $wall_missing } {
+	print_banner {"-Wall compile flag missing from code, add it."}
+	clean_up
+	exit -1
+}
+if { $executable_is_missing } {
+	print_banner {"The following required executables were not created by make."}
+	foreach m $missing_executables {
+		send_user "$m\n"
+	}
+	clean_up
+	exit -1
+}
+
+print_banner {"Compilation successful."}
+
+# Run submission and check against results
+set EXEC [lindex $EXECUTABLES 0]
+array set student_errors {}
+set count_error 0
+set parse_error 0
+foreach {chunk_size tag_count} [array get tag_counts] {
+	set chunk_size_checked 0
+	spawn -noecho ./$EXEC $chunk_size
+	expect {
+		-re {[^=:]*[=:]\s*(\d*).*\n} {
+			set student_count $expect_out(1,string)
+			set chunk_size_checked 1
+			if { $student_count != $tag_count } {
+				set student_errors($chunk_size) $student_count
+				set count_error 1
+			}
+		}
+		eof
+	}
+
+	if { !$chunk_size_checked } {
+		set student_errors($chunk_size) 0
+		set count_error 1
+		set parse_error 1
+	}
+}
+
+# Print any errors or success message
+if { $parse_error } {
+	print_banner {"Some program output was improperly formatted." "Ensure each line consists of a label, a colon, and a count." "All lines with a count of 0 had parse errors." "Example -> Number of <p> tags: 5"}
+}
+if { $count_error } {
+	print_banner {"You had errors at the following chunk sizes."}
+	foreach size [array names student_errors] {
+		send_user "Chunk size $size should have $tag_counts($size) tags, but you counted $student_errors($size) tags\n"
+	}
+} else {
+	print_banner {"All tests passed."}
+}
+
+clean_up
+
+return 0

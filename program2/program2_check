@@ -1,0 +1,345 @@
+#!/usr/bin/expect -f
+
+set TMP_DIR tmp_local_dir_for_check
+set TMP_SERVER_DIR tmp_server
+
+set HOME_DIR [file dirname [file normalize [info script]]]
+
+set HOST 132.241.6.25
+#set HOST 132.241.44.12
+#set HOST 192.168.18.100
+set PORT [expr int(rand()*10000) + 5000]
+
+set NONEXISTENT_FILE not_here
+
+set SERVER_EXECUTABLE file_server
+set SERVER_ARGS {$PORT}
+
+set CLIENT_EXECUTABLE file_client
+set CLIENT_ARGS {$HOST $PORT}
+
+set TEST_FILES {text1.txt text2.txt text3.txt text4.txt text5.txt text6.txt binary1.bin binary2.bin}
+
+set BASE_FILES [list ]
+
+set EXECUTABLES [eval list $SERVER_EXECUTABLE $CLIENT_EXECUTABLE]
+
+set timeout 1
+set MAX_TIMEOUTS 600
+
+proc print_banner {message} {
+	puts ===================================================
+    foreach m $message {
+	    puts "|  $m"
+    }
+	puts ===================================================
+}
+
+proc blank_line {} {
+	send_user "\n"
+}
+
+proc clean_up {} {
+	global TMP_DIR
+	if { [lindex [file split [pwd]] end] eq $TMP_DIR } {
+		cd ..
+	}
+	file delete -force $TMP_DIR
+}
+
+proc prepare_server {} {
+	global HOME_DIR
+	global TMP_SERVER_DIR
+	global SERVER_EXECUTABLE
+	global TEST_FILES
+	file mkdir $TMP_SERVER_DIR
+	foreach f $TEST_FILES {
+		file copy $HOME_DIR/$f $TMP_SERVER_DIR
+	}
+	file rename $SERVER_EXECUTABLE $TMP_SERVER_DIR
+}
+
+proc start_server {} {
+	global TMP_SERVER_DIR
+	global SERVER_EXECUTABLE
+	global SERVER_ARGS
+	global PORT
+	global HOST
+	cd $TMP_SERVER_DIR
+	# Incriment PORT to avoid bind problems
+	set PORT [expr $PORT+1]
+	eval spawn ./$SERVER_EXECUTABLE $SERVER_ARGS
+	if { $spawn_id == 0 } {
+		set ret -1
+	} else {
+		set ret $spawn_id
+	}
+	cd ../
+	return $ret
+}
+
+# Check if the temp directory exists
+if { [file exists $TMP_DIR] } {
+	print_banner [list "[concat Temporary directory `$TMP_DIR` exists, remove it first]"]
+	exit -1
+}
+
+# Check if help message should be printed
+if { ([llength $argv] == 0) || ([lindex $argv 0] eq "help") } {
+	send_user "Usage: [info script] <file1> <file2> ....\n"
+	send_user "  Include all files for your assignment as arguments to the script.\n"
+	send_user "  The script will create (and then delete) a small number of files in your current directory.\n"
+	return -1
+}
+
+# Ensure the required test files are present
+foreach f $TEST_FILES {
+	if { !([file exists $HOME_DIR/$f] && [file readable $HOME_DIR/$f]) } {
+		print_banner {"Unable to read test files. Report to Prof. Kredo."}
+		exit -1
+	}
+}
+
+# Create the temp directory
+file mkdir $TMP_DIR
+
+# Indicate which files are evaluated and check if they are present
+set files_in_error 0
+set error_files {}
+print_banner {"You are evaluating the following files."}
+foreach f $argv {
+	send_user "$f\n"
+
+	if { !([file exists $f]) || !([file readable $f]) || [file isdirectory $f] || ($f in $BASE_FILES) || ($f in $TEST_FILES)} {
+		set files_in_error 1
+		lappend error_files $f
+	}
+	if { !$files_in_error } {
+		file copy $f $TMP_DIR
+	}
+}
+
+# Print error and quit if any files unavailable
+if { $files_in_error } {
+	print_banner {"Unable to process the following files." "Ensure names and permissions are correct." "Do not submit directories." "Do not submit filenames that match any test files."}
+	foreach f $error_files {
+		send_user "$f\n"
+	}
+	clean_up
+	exit -1
+}
+
+# Copy the base files to the directory
+foreach f $BASE_FILES {
+	file copy $HOME_DIR/$f $TMP_DIR
+}
+
+cd $TMP_DIR
+
+blank_line
+print_banner {"Attempting to build the executables."}
+# Flags to track compile errors and if -Wall is missing
+set wall_missing 0
+set compile_error 0
+spawn -noecho make
+expect {
+	# Compile lines are normal
+	-re ^(gcc|cc|g+).* {
+		# Check if -Wall is present in the compile command
+		if { [string first "-Wall" $expect_out(buffer)] == -1 } {set wall_missing 1}
+		exp_continue
+	}
+	# Error lines include a colon (:)
+	: {
+		set compile_error 1
+		exp_continue
+	}
+	eof
+}
+
+# Check that the executables are present
+set executable_is_missing 0
+set missing_executables {}
+foreach f $EXECUTABLES {
+	if { !([file exists $f] && [file executable $f]) } {
+		set executable_is_missing 1
+		lappend missing_executables $f
+		send_user "Errors creating program $f\n"
+
+		if { ![file exists $f] } {
+			send_user "$f does not exist\n"
+		}
+		if { ![file executable $f] } {
+			send_user "$f is not executable\n"
+		}
+	}
+}
+
+# Check for any problems
+if { $compile_error } {
+	print_banner {"Compilation failure or unclean compile, correct your code."}
+	clean_up
+	exit -1
+}
+if { $wall_missing } {
+	print_banner {"-Wall compile flag missing from code, add it."}
+	clean_up
+	exit -1
+}
+if { $executable_is_missing } {
+	print_banner {"The following required executables were not created by make."}
+	foreach m $missing_executables {
+		send_user "$m\n"
+	}
+	clean_up
+	exit -1
+}
+
+print_banner {"Compilation successful."}
+
+prepare_server
+
+set transfer_errors 0
+# Run the client and server for each test file
+foreach f [eval list $TEST_FILES $NONEXISTENT_FILE] {
+
+	set expect_sids [list]
+	blank_line
+	print_banner [ subst {"Attempting to copy file $f"}]
+
+	# Attempt to start the server
+	set server_sid [start_server]
+	if { $server_sid == -1 } {
+		print_banner {"Error running server program." "Check arguments and program output."}
+		clean_up
+		exit -1
+	}
+    set expect_sids [lappend expect_sids $server_sid]
+
+	# Let the server complete startup before starting client
+	sleep 1
+
+	# Attempt to run the client
+	eval spawn ./$CLIENT_EXECUTABLE $CLIENT_ARGS $f
+	set client_sid $spawn_id
+	if { $client_sid == -1 } {
+		print_banner {"Error running client program." "Check arguments and program output."}
+		clean_up
+		exit -1
+	}
+    set expect_sids [lappend expect_sids $client_sid]
+
+	set timeout_count 0
+	# Collect all the output from the programs and close when done
+	while { ($server_sid != -1) || ($client_sid != -1) } {
+		expect {
+			-i $expect_sids timeout {
+				# If client is closed or maximum timeouts reached, end program
+				if { $client_sid == -1 || $timeout_count >= $MAX_TIMEOUTS } {
+					# Print error to user if client doesn't close
+					if { $client_sid != -1 } {
+						print_banner {"Timeout waiting for program to close." "Program doesn't terminate or takes too long."}
+			    		set transfer_errors [expr $transfer_errors + 1]
+					}
+					sleep 1
+					if { $server_sid != -1 } {
+						close -i $server_sid
+						wait -i $server_sid
+                    	set idx [lsearch $expect_sids $server_sid]
+                    	set expect_sids [lreplace $expect_sids $idx $idx]
+						set server_sid -1
+					}
+					if { $client_sid != -1 } {
+						close -i $client_sid
+						wait -i $client_sid
+                    	set idx [lsearch $expect_sids $client_sid]
+                    	set expect_sids [lreplace $expect_sids $idx $idx]
+						set client_sid -1
+					}
+				} else {
+					set timeout_count [expr $timeout_count + 1]
+				}
+			}
+			-i $expect_sids eof {
+				if { $expect_out(spawn_id) == $server_sid } {
+					lassign [wait -i $server_sid] pid sid err ret
+                    set idx [lsearch $expect_sids $server_sid]
+                    set expect_sids [lreplace $expect_sids $idx $idx]
+					set server_sid -1
+					if { $err == 0 } {
+						if { $ret != 0 } {
+							print_banner [ subst {
+								"Server closed with non-zero return value ($ret)."
+								"Check for errors and return 0 when there are no errors."
+							}]
+						}
+					} else {
+						print_banner [ subst {
+							"Server closed with errno $ret."
+							"Determine cause of error and correct it."
+						}]
+					}
+				} else {
+					lassign [wait -i $client_sid] pid sid err ret
+                    set idx [lsearch $expect_sids $client_sid]
+                    set expect_sids [lreplace $expect_sids $idx $idx]
+					set client_sid -1
+					if { $err == 0 } {
+						# Ignore non-zero return on non-existent file
+						if { ($ret != 0) && !( $f eq $NONEXISTENT_FILE) } {
+							print_banner [ subst {
+								"Client closed with non-zero return value ($ret)."
+								"Check for errors and return 0 when there are no errors."
+							}]
+						}
+					} else {
+						print_banner [ subst {
+							"Client closed with errno $ret."
+							"Determine cause of error and correct it."
+						}]
+					}
+				}
+			}
+		}
+	}
+
+	# Local file should not be created for non-existent file
+	if {  $f eq $NONEXISTENT_FILE  } {
+		if { [file exists $f] } {
+			print_banner {"Local file should not be created for file error on server."}
+			set transfer_errors [expr $transfer_errors + 1]
+		} else {
+			print_banner {"Non-existent file handled correctly."}
+		}
+	} else {
+		# Check local file has correct name
+		if { !( [file exists $f] ) } {
+			print_banner [ subst {"Local copy of file $f missing."}]
+			set transfer_errors [expr $transfer_errors + 1]
+		} else {
+			# Compare the transferred file
+			if { [catch {eval exec diff -s $HOME_DIR/$f $f}] } {
+				print_banner [ subst {"INCORRECT transfer of file $f"}]
+				blank_line
+				set transfer_errors [expr $transfer_errors + 1]
+			} else {
+				print_banner [ subst {"CORRECT transfer of file $f"}]
+				blank_line
+			}
+		}
+	}
+
+	sleep 1
+}
+
+blank_line
+
+if { $transfer_errors == 0 } {
+	print_banner {"All tests successful."}
+} else {
+	print_banner [ subst {"At least $transfer_errors errors while running submission."}]
+}
+
+clean_up
+
+return 0

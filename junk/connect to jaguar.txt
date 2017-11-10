@@ -1,0 +1,5 @@
+ssh lnguyen34@jaguar.csuchico.edu
+
+sftp lnguyen34@jaguar.csuchico.edu
+
+put localfile
